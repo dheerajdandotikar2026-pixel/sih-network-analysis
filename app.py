@@ -1,3 +1,14 @@
+import base64
+
+def convert_uploaded_image_to_base64(uploaded_file):
+    """Converts a Streamlit uploaded image file into a Base64 Data URI for PyVis graph rendering."""
+    if uploaded_file is None:
+        return None
+    bytes_data = uploaded_file.getvalue()
+    base64_str = base64.b64encode(bytes_data).decode('utf-8')
+    # Detect image extension
+    file_type = uploaded_file.type if hasattr(uploaded_file, 'type') else 'image/png'
+    return f"data:{file_type};base64,{base64_str}"
 import streamlit as st
 import pandas as pd
 import networkx as nx
@@ -231,57 +242,81 @@ def clean_entity_list(data):
     return list(set(cleaned))
 
 
-def extract_entities_from_text(text):
-    """Uses local Llama 3 with strict validation. Falls back to sanitized regex if Llama 3 is offline."""
-    
-    prompt = f"""
-You are a police intelligence extraction engine. Extract key entities from this FIR document.
-Return ONLY a valid JSON object matching this schema EXACTLY:
+import json
+import requests
 
+def extract_entities_from_text(text):
+    """Extracts intelligence data strictly adhering to structured CCTNS crime categories."""
+    prompt = f"""
+You are a Police Intelligence System. Extract structured crime data from the FIR text below.
+DO NOT include sentence fragments, verbs, or narrative words like 'became suspicious' or 'the complainant'.
+
+Return ONLY a valid JSON object strictly matching this schema:
 {{
-    "Suspects": ["Name 1", "Name 2"],
-    "Phones": ["Phone number"],
-    "Vehicles": ["Vehicle registration"],
-    "Organizations": ["Organization name"],
-    "Locations": ["City or Place"]
+    "Suspects": [
+        {{"name": "Full Name", "rank": "A1", "reason": "Prime suspect / accused"}}
+    ],
+    "Victims": ["Full Name"],
+    "Victim_Family": ["Full Name"],
+    "Witnesses": ["Full Name"],
+    "Locations": ["Specific Location / Police Station"],
+    "Vehicles": ["License Plate or Description"],
+    "Phones": ["Phone Number"]
 }}
+
+Rank Rules for Suspects:
+- "A1": Prime suspect / Mastermind / Main accused
+- "A2" to "A5": Co-conspirators, accomplices, or secondary suspects ordered by involvement level.
 
 FIR Text:
 \"\"\"
 {text}
 \"\"\"
 """
-    entities = {"Suspects": [], "Phones": [], "Vehicles": [], "Organizations": [], "Locations": []}
-    
-    # 1. Primary: Local Llama 3 via Ollama
+    # Default schema fallback
+    fallback = {
+        "Suspects": [],
+        "Victims": [],
+        "Victim_Family": [],
+        "Witnesses": [],
+        "Locations": [],
+        "Vehicles": [],
+        "Phones": []
+    }
+
     try:
         res = requests.post(
             "http://localhost:11434/api/generate",
             json={"model": "llama3", "prompt": prompt, "stream": False, "format": "json"},
-            timeout=10
+            timeout=12
         )
         if res.status_code == 200:
-            raw_json = json.loads(res.json().get("response", "{}"))
-            for key in entities:
-                entities[key] = clean_entity_list(raw_json.get(key, []))
-            return entities
+            data = json.loads(res.json().get("response", "{}"))
+            # Validate suspect hierarchy structure
+            suspects = []
+            for item in data.get("Suspects", []):
+                if isinstance(item, dict) and "name" in item:
+                    suspects.append({
+                        "name": item["name"].strip(),
+                        "rank": item.get("rank", "A1").upper(),
+                        "reason": item.get("reason", "Accused")
+                    })
+                elif isinstance(item, str) and len(item.strip()) > 1:
+                    suspects.append({"name": item.strip(), "rank": "A1", "reason": "Accused"})
+
+            return {
+                "Suspects": suspects,
+                "Victims": [v for v in data.get("Victims", []) if isinstance(v, str) and len(v) > 1],
+                "Victim_Family": [f for f in data.get("Victim_Family", []) if isinstance(f, str) and len(f) > 1],
+                "Witnesses": [w for w in data.get("Witnesses", []) if isinstance(w, str) and len(w) > 1],
+                "Locations": [l for l in data.get("Locations", []) if isinstance(l, str) and len(l) > 1],
+                "Vehicles": [veh for veh in data.get("Vehicles", []) if isinstance(veh, str) and len(veh) > 1],
+                "Phones": [p for p in data.get("Phones", []) if isinstance(p, str) and len(p) > 1]
+            }
     except Exception:
-        pass  # Fallback to strict regex engine below if Ollama is unreachable
+        pass
 
-    # 2. Fallback: Sanitized Regex Extraction
-    people = re.findall(r'(?:Name|Complainant|Witness|Suspect|Accused|Officer|known as)\s*:?\s*["“]?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)["”]?', text, re.I)
-    phones = re.findall(r'\b[6-9]\d{9}\b', text)
-    vehicles = re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text)
-    quotes = re.findall(r'["“](.*?)["”]', text)
-    locations = re.findall(r'\b(?:District|Station|Ward|at|near)\s*:?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text)
-
-    entities["Suspects"] = clean_entity_list(people)
-    entities["Phones"] = clean_entity_list(phones)
-    entities["Vehicles"] = clean_entity_list(vehicles)
-    entities["Organizations"] = clean_entity_list(quotes)
-    entities["Locations"] = clean_entity_list(locations)
-
-    return entities
+    return fallback
 
 def build_global_graph(fir_rows, watchlist_rows):
     """Integrates FIRs, Watchlist profiles, Photos, and Modus Operandi into Knowledge Graph."""
@@ -398,15 +433,27 @@ elif action_mode == "Upload Custom FIR":
     c_fir_no = st.sidebar.text_input("FIR Number", "FIR-2026-901")
     c_state = st.sidebar.selectbox("State / UT (All 36 Available)", list(STATE_COORDINATES.keys()))
     c_station = st.sidebar.text_input("Police Station", "District Central PS")
-    uploaded_txt = st.sidebar.file_uploader("Upload FIR Document (.txt)", type=["txt"])
-    uploaded_photo = st.sidebar.file_uploader("Upload Suspect Face Photo (Optional)", type=["jpg", "png", "jpeg"])
-    
-    if st.sidebar.button("Ingest FIR into Database"):
-        if uploaded_txt:
-            txt_content = uploaded_txt.read().decode("utf-8")
-            face_hash = generate_image_hash(uploaded_photo) if uploaded_photo else ""
-            mo_pattern = detect_modus_operandi(txt_content)
-            extracted = extract_entities_from_text(txt_content)
+   fir_text = st.sidebar.text_area("Paste FIR Document / Structured Details", height=200)
+        uploaded_photo = st.sidebar.file_uploader("Upload Suspect Face Photo (Optional)", type=["jpg", "png", "jpeg"])
+
+        if st.sidebar.button("Ingest FIR into Database"):
+            if fir_text.strip():
+                # Safely convert image to base64 if uploaded
+                import base64
+                face_b64 = ""
+                if uploaded_photo is not None:
+                    face_b64 = base64.b64encode(uploaded_photo.read()).decode("utf-8")
+                
+                # Extract entities using your existing function
+                data = extract_entities_from_text(fir_text)
+                
+                # Bind face image directly to the A1 Suspect (first suspect in list)
+                if face_b64 and "Suspects" in data and len(data["Suspects"]) > 0:
+                    data["Suspects"][0]["image"] = face_b64
+                
+                # Save structured record into Session State
+                st.session_state['last_ingested_fir'] = data
+                st.sidebar.success("✅ FIR ingested successfully with structured hierarchy!")
             
             insert_fir(c_fir_no, c_state, c_station, txt_content, mo_pattern, extracted, face_hash)
             st.sidebar.success("FIR filed & biometrics cross-linked in Database!")
@@ -476,50 +523,157 @@ if fir_rows or watchlist_rows:
     # TAB 1: KNOWLEDGE GRAPH
     with t1:
         st.subheader("Global Entity Relationship Graph")
-        st.caption("Node Types: 🔴 Suspects | 🔵 Phones | 🟡 Vehicles | 🟣 Orgs | 🟢 Locations | 💗 Face Biometrics | 🟧 Modus Operandi")
+        st.caption("Node Types: 🔴 Suspects (A1-A5) | 🟦 Victims | 🟪 Family | 🟢 Witnesses | 🟡 Vehicles | 🔵 Phones | 📍 Locations")
         
-        # Removed the buggy select/filter menus. Kept it simple and clean.
-        net = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white")
+        net = Network(height="680px", width="100%", bgcolor="#0F172A", font_color="white")
+        
+        # Color mapping by category & suspect hierarchy
+        rank_colors = {"A1": "#EF4444", "A2": "#F97316", "A3": "#F59E0B", "A4": "#EAB308", "A5": "#84CC16"}
         
         for node, attrs in G.nodes(data=True):
-            # GUARD: Ignore single-character junk nodes or empty spaces
+            # Guard against invalid nodes
             if len(str(node).strip()) <= 1:
                 continue
+                
+            node_type = attrs.get("type", "Entity")
+            image_url = attrs.get("image", None)
+            rank = attrs.get("rank", "A1")
             
-            sources_linked = entity_fir_map.get(node, set())
-            is_cross_matched = len(sources_linked) > 1
-            
-            node_size = 38 if is_cross_matched else 20
-            label = f"{node} ★ ({len(sources_linked)} Sources)" if is_cross_matched else node
-            
-            net.add_node(
-                node, 
-                label=label, 
-                color=attrs.get("color", "#CCCCCC"), 
-                size=node_size,
-                borderWidth=3 if is_cross_matched else 1,
-                title=f"Entity: {node}<br>Sources: {', '.join(sources_linked)}"
-            )
-            
+            # Setup styling per category
+            if node_type == "Suspect":
+                color = rank_colors.get(rank, "#EF4444")
+                size = 45 if rank == "A1" else 30
+                label = f"[{rank}] {node}"
+            elif node_type == "Victim":
+                color = "#3B82F6"
+                size = 28
+                label = f"Victim: {node}"
+            elif node_type == "Victim_Family":
+                color = "#A855F7"
+                size = 22
+                label = f"Family: {node}"
+            elif node_type == "Witness":
+                color = "#10B981"
+                size = 22
+                label = f"Witness: {node}"
+            else:
+                color = attrs.get("color", "#94A3B8")
+                size = 20
+                label = str(node)
+
+            # Node creation kwargs
+            node_kwargs = {
+                "label": label,
+                "color": color,
+                "size": size,
+                "borderWidth": 3 if rank == "A1" else 1,
+                "title": f"Category: {node_type}<br>Details: {attrs.get('info', 'Linked to case')}"
+            }
+
+            # Embed Face Image on Node if present
+            if image_url:
+                node_kwargs["shape"] = "circularImage"
+                node_kwargs["image"] = image_url
+            else:
+                node_kwargs["shape"] = "dot"
+
+            net.add_node(node, **node_kwargs)
+
         for u, v, attrs in G.edges(data=True):
             net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
-            
-        # Native PyVis method for stable spacing without raw JS injection
+
+        # Stable force layout configuration
         net.force_atlas_2based(
-            gravity=-150,
+            gravity=-120,
             central_gravity=0.015,
-            spring_length=150,
-            spring_strength=0.08,
-            damping=0.4,
+            spring_length=180,
+            spring_strength=0.06,
             overlap=0.8
         )
-        
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
             net.save_graph(tmp.name)
             tmp_path = tmp.name
-            
+
         with open(tmp_path, 'r', encoding='utf-8') as f:
-            components.html(f.read(), height=670)
+            components.html(f.read(), height=700)
+        os.remove(tmp_path)# TAB 1: KNOWLEDGE GRAPH
+    with t1:
+        st.subheader("Global Entity Relationship Graph")
+        st.caption("Node Types: 🔴 Suspects (A1-A5) | 🟦 Victims | 🟪 Family | 🟢 Witnesses | 🟡 Vehicles | 🔵 Phones | 📍 Locations")
+        
+        net = Network(height="680px", width="100%", bgcolor="#0F172A", font_color="white")
+        
+        # Color mapping by category & suspect hierarchy
+        rank_colors = {"A1": "#EF4444", "A2": "#F97316", "A3": "#F59E0B", "A4": "#EAB308", "A5": "#84CC16"}
+        
+        for node, attrs in G.nodes(data=True):
+            # Guard against invalid nodes
+            if len(str(node).strip()) <= 1:
+                continue
+                
+            node_type = attrs.get("type", "Entity")
+            image_url = attrs.get("image", None)
+            rank = attrs.get("rank", "A1")
+            
+            # Setup styling per category
+            if node_type == "Suspect":
+                color = rank_colors.get(rank, "#EF4444")
+                size = 45 if rank == "A1" else 30
+                label = f"[{rank}] {node}"
+            elif node_type == "Victim":
+                color = "#3B82F6"
+                size = 28
+                label = f"Victim: {node}"
+            elif node_type == "Victim_Family":
+                color = "#A855F7"
+                size = 22
+                label = f"Family: {node}"
+            elif node_type == "Witness":
+                color = "#10B981"
+                size = 22
+                label = f"Witness: {node}"
+            else:
+                color = attrs.get("color", "#94A3B8")
+                size = 20
+                label = str(node)
+
+            # Node creation kwargs
+            node_kwargs = {
+                "label": label,
+                "color": color,
+                "size": size,
+                "borderWidth": 3 if rank == "A1" else 1,
+                "title": f"Category: {node_type}<br>Details: {attrs.get('info', 'Linked to case')}"
+            }
+
+            # Embed Face Image on Node if present
+            if image_url:
+                node_kwargs["shape"] = "circularImage"
+                node_kwargs["image"] = image_url
+            else:
+                node_kwargs["shape"] = "dot"
+
+            net.add_node(node, **node_kwargs)
+
+        for u, v, attrs in G.edges(data=True):
+            net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
+
+        # Stable force layout configuration
+        net.force_atlas_2based(
+            gravity=-120,
+            central_gravity=0.015,
+            spring_length=180,
+            spring_strength=0.06,
+            overlap=0.8
+        )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
+            net.save_graph(tmp.name)
+            tmp_path = tmp.name
+
+        with open(tmp_path, 'r', encoding='utf-8') as f:
+            components.html(f.read(), height=700)
         os.remove(tmp_path)
 
     # TAB 2: GEOSPATIAL MAP (DYNAMIC ALL-INDIA PLOTTING)
