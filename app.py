@@ -203,26 +203,30 @@ def detect_modus_operandi(text):
     return "Standard Criminal Activity"
 
 def extract_entities_from_text(text):
-    """Extracts strictly defined suspects, phone numbers, vehicles, orgs, and locations."""
-    # Stricter Regex: Only extract names explicitly flagged as suspects/accused/etc.
-    suspects_found = re.findall(r'(?:suspect|accused|target|alias|criminal|gangster|arrested|member)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text, re.I)
+    """Balanced NLP Extractor: strict enough to avoid noise, flexible enough for custom texts."""
     
-    # (Removed the overly aggressive all_capitalized regex that was causing the "noise")
+    # 1. Extract People (Looks for words immediately following Name, Complainant, Witness, Suspect, etc.)
+    people = re.findall(r'(?:Name|Complainant|Witness|Suspect|Accused|Target)[^A-Za-z]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text, re.I)
     
-    stopwords = ["Deccan Logistics", "Mahindra Scorpio", "Police Station", "State Police", "Crime Branch", 
-                 "First Information", "Investigation Officer", "Action Taken", "Preliminary Investigation"]
+    # 2. Extract Phone Numbers (Relaxed to catch any standard 10-digit sequence)
+    phones = re.findall(r'\b\d{10}\b', text)
     
-    suspects = list(set([s for s in suspects_found if s not in stopwords]))
+    # 3. Extract Vehicles (Standard License Plates)
+    vehicles = re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text)
     
-    entities = {
-        "Suspects": suspects,
-        "Phones": list(set(re.findall(r'\b[6-9]\d{9}\b', text))),
-        "Vehicles": list(set(re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text))),
-        "Organizations": list(set([item for sub in re.findall(r"'(.*?)'|\"(.*?)\"", text) for item in sub if item])),
-        # Strict Location Regex: Must be capitalized words following specific prepositions
-        "Locations": list(set(re.findall(r'\b(?:near|at|in|towards)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text)))
+    # 4. Extract Quotes (Upgraded to support both standard "" and typographic “ ” smart quotes)
+    orgs = re.findall(r'["“](.*?)["”]', text)
+    
+    # 5. Extract Locations (Words following District, Station, near, at)
+    locs = re.findall(r'\b(?:near|at|in|District|Station)[^A-Za-z]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text, re.I)
+    
+    return {
+        "Suspects": list(set(people)),
+        "Phones": list(set(phones)),
+        "Vehicles": list(set(vehicles)),
+        "Organizations": list(set(orgs)),  # This will catch your quoted goat and loudspeaker announcements
+        "Locations": list(set(locs))
     }
-    return entities
 
 def build_global_graph(fir_rows, watchlist_rows):
     """Integrates FIRs, Watchlist profiles, Photos, and Modus Operandi into Knowledge Graph."""
