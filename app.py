@@ -26,7 +26,16 @@ if uploaded_file:
 
     # Render the interactive network graph
     st.write(n)
-    n.show("Criminal Network Analysis")
+    import streamlit.components.v1 as components
+
+# Save the network graph locally inside the cloud container
+net.save_graph("network.html")
+
+# Read the HTML and safely display it in the Streamlit app
+with open("network.html", "r", encoding="utf-8") as f:
+    html_data = f.read()
+
+components.html(html_data, height=650, scrolling=True)
 
     # Create a sidebar section to list the top 3 'Key Influencers'
     st.sidebar.title("Key Influencers")
