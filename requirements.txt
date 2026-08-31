@@ -1,4 +1,6 @@
 streamlit
-pyvis
 networkx
+pyvis
 groq
+scipy
+numpy
