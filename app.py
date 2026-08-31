@@ -202,30 +202,87 @@ def detect_modus_operandi(text):
         return "Serial Violent Crime Signature"
     return "Standard Criminal Activity"
 
+import requests
+
 def extract_entities_from_text(text):
-    """Balanced NLP Extractor: strict enough to avoid noise, flexible enough for custom texts."""
-    
-    # 1. Extract People (Looks for words immediately following Name, Complainant, Witness, Suspect, etc.)
-    people = re.findall(r'(?:Name|Complainant|Witness|Suspect|Accused|Target)[^A-Za-z]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text, re.I)
-    
-    # 2. Extract Phone Numbers (Relaxed to catch any standard 10-digit sequence)
-    phones = re.findall(r'\b\d{10}\b', text)
-    
-    # 3. Extract Vehicles (Standard License Plates)
-    vehicles = re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text)
-    
-    # 4. Extract Quotes (Upgraded to support both standard "" and typographic “ ” smart quotes)
-    orgs = re.findall(r'["“](.*?)["”]', text)
-    
-    # 5. Extract Locations (Words following District, Station, near, at)
-    locs = re.findall(r'\b(?:near|at|in|District|Station)[^A-Za-z]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text, re.I)
-    
+    """Uses local Llama 3 (via Ollama API) to extract precise criminal entities into JSON.
+    Includes a noise-sanitized fallback if local LLM is unreachable.
+    """
+    prompt = f"""
+You are an expert CCTNS Police Intelligence NLP Engine.
+Extract criminal entities from the following FIR text and return strictly a valid JSON object.
+
+Rules:
+1. "Suspects": Extract full names of suspects, accused persons, complainants, witnesses, or named animals/aliases mentioned. Do NOT include common verbs or generic words.
+2. "Phones": Extract 10-digit telephone/mobile numbers.
+3. "Vehicles": Extract vehicle registration/license numbers or descriptions.
+4. "Organizations": Extract names of gangs, companies, or specific equipment/objects in quotes.
+5. "Locations": Extract distinct places, wards, cities, or police stations.
+
+Return ONLY the raw JSON string matching this exact schema:
+{{
+    "Suspects": [],
+    "Phones": [],
+    "Vehicles": [],
+    "Organizations": [],
+    "Locations": []
+}}
+
+FIR Text:
+\"\"\"
+{text}
+\"\"\"
+"""
+
+    # 1. Attempt Local Llama 3 Extraction
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "llama3",
+                "prompt": prompt,
+                "stream": False,
+                "format": "json"
+            },
+            timeout=12
+        )
+        if response.status_code == 200:
+            result_str = response.json().get("response", "{}")
+            extracted = json.loads(result_str)
+            
+            # Ensure all required keys exist
+            return {
+                "Suspects": extracted.get("Suspects", []),
+                "Phones": extracted.get("Phones", []),
+                "Vehicles": extracted.get("Vehicles", []),
+                "Organizations": extracted.get("Organizations", []),
+                "Locations": extracted.get("Locations", [])
+            }
+    except Exception as e:
+        st.warning(f"⚠️ Local Llama 3 API offline or unreachable. Using sanitized fallback engine.")
+
+    # 2. Strict Fallback Engine (Discards English Verbs & Common Noun Phrases)
+    stop_words = {
+        "has been", "the time", "the shape", "approximately", "investigation", 
+        "action taken", "preliminary investigation", "the complainant", "witness statements",
+        "offences under", "official note", "complainant details", "nature of offence"
+    }
+
+    # Extract potential names following specific roles
+    raw_people = re.findall(r'(?:Name|Complainant|Witness|Officer|Suspect|Accused|known as)\s*:?\s*["“]?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)["”]?', text, re.I)
+    cleaned_people = [p.strip() for p in raw_people if p.lower() not in stop_words and len(p.split()) <= 3]
+
+    phones = list(set(re.findall(r'\b[6-9]\d{9}\b', text)))
+    vehicles = list(set(re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text)))
+    quotes = list(set([item for sub in re.findall(r'["“](.*?)["”]', text) for item in sub if item and len(item) < 40]))
+    locations = list(set(re.findall(r'\b(?:District|Station|Ward|at|near)\s*:?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text)))
+
     return {
-        "Suspects": list(set(people)),
-        "Phones": list(set(phones)),
-        "Vehicles": list(set(vehicles)),
-        "Organizations": list(set(orgs)),  # This will catch your quoted goat and loudspeaker announcements
-        "Locations": list(set(locs))
+        "Suspects": list(set(cleaned_people)),
+        "Phones": phones,
+        "Vehicles": vehicles,
+        "Organizations": quotes,
+        "Locations": [loc for loc in locations if loc.lower() not in stop_words]
     }
 
 def build_global_graph(fir_rows, watchlist_rows):
