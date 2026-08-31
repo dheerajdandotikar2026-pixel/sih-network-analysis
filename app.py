@@ -38,9 +38,9 @@ with open("network.html", "r", encoding="utf-8") as f:
 components.html(html_data, height=650, scrolling=True)
 
     # Create a sidebar section to list the top 3 'Key Influencers'
-    st.sidebar.title("Key Influencers")
-    key_influencers = nx.pagerank(G).items()
-    key_influencers.sort(key=lambda x: x[1], reverse=True)
-    st.sidebar.write(f"Top 3 Key Influencers: {key_influencers[:3]}")
+st.sidebar.title("Key Influencers")
+key_influencers = nx.pagerank(G).items()
+key_influencers.sort(key=lambda x: x[1], reverse=True)
+st.sidebar.write(f"Top 3 Key Influencers: {key_influencers[:3]}")
 else:
     st.write("Please upload a FIR text file.")
