@@ -1,14 +1,4 @@
 import base64
-
-def convert_uploaded_image_to_base64(uploaded_file):
-    """Converts a Streamlit uploaded image file into a Base64 Data URI for PyVis graph rendering."""
-    if uploaded_file is None:
-        return None
-    bytes_data = uploaded_file.getvalue()
-    base64_str = base64.b64encode(bytes_data).decode('utf-8')
-    # Detect image extension
-    file_type = uploaded_file.type if hasattr(uploaded_file, 'type') else 'image/png'
-    return f"data:{file_type};base64,{base64_str}"
 import streamlit as st
 import pandas as pd
 import networkx as nx
@@ -21,8 +11,19 @@ import sqlite3
 import json
 import pydeck as pdk
 import hashlib
+import requests
 from datetime import datetime
 from PIL import Image
+
+def convert_uploaded_image_to_base64(uploaded_file):
+    """Converts a Streamlit uploaded image file into a Base64 Data URI for PyVis graph rendering."""
+    if uploaded_file is None:
+        return None
+    bytes_data = uploaded_file.getvalue()
+    base64_str = base64.b64encode(bytes_data).decode('utf-8')
+    # Detect image extension
+    file_type = uploaded_file.type if hasattr(uploaded_file, 'type') else 'image/png'
+    return f"data:{file_type};base64,{base64_str}"
 
 # -----------------------------------------------------------------------------
 # PAGE CONFIGURATION & STYLING
@@ -194,7 +195,7 @@ init_db()
 # -----------------------------------------------------------------------------
 def generate_image_hash(image_file):
     if image_file is not None:
-        image_bytes = image_file.read()
+        image_bytes = image_file.getvalue()
         return "FACE_BIO_" + hashlib.md5(image_bytes).hexdigest()[:10].upper()
     return ""
 
@@ -213,14 +214,9 @@ def detect_modus_operandi(text):
         return "Serial Violent Crime Signature"
     return "Standard Criminal Activity"
 
-import json
-import re
-import requests
-
 def clean_entity_list(data):
-    """Guarantees data is a clean list of valid strings (rejects single characters, numbers, and strings disguised as lists)."""
+    """Guarantees data is a clean list of valid strings."""
     if isinstance(data, str):
-        # If LLM returned a single string, split by commas or wrap in a list
         data = [s.strip() for s in data.split(",") if s.strip()]
     if not isinstance(data, list):
         return []
@@ -235,15 +231,10 @@ def clean_entity_list(data):
         if not isinstance(item, str):
             continue
         item = item.strip().strip('"' + "'")
-        # Reject single letters, standalone digits, stop words, or excessively long sentences
         if len(item) > 1 and item.lower() not in stop_words and not item.isdigit() and len(item) < 60:
             cleaned.append(item)
             
     return list(set(cleaned))
-
-
-import json
-import requests
 
 def extract_entities_from_text(text):
     """Extracts intelligence data strictly adhering to structured CCTNS crime categories."""
@@ -273,15 +264,9 @@ FIR Text:
 {text}
 \"\"\"
 """
-    # Default schema fallback
     fallback = {
-        "Suspects": [],
-        "Victims": [],
-        "Victim_Family": [],
-        "Witnesses": [],
-        "Locations": [],
-        "Vehicles": [],
-        "Phones": []
+        "Suspects": [], "Victims": [], "Victim_Family": [],
+        "Witnesses": [], "Locations": [], "Vehicles": [], "Phones": []
     }
 
     try:
@@ -292,7 +277,6 @@ FIR Text:
         )
         if res.status_code == 200:
             data = json.loads(res.json().get("response", "{}"))
-            # Validate suspect hierarchy structure
             suspects = []
             for item in data.get("Suspects", []):
                 if isinstance(item, dict) and "name" in item:
@@ -328,7 +312,10 @@ def build_global_graph(fir_rows, watchlist_rows):
         f_id, fir_no, state, station, timestamp, text, mo_pattern, entities_json, face_hash = row
         entities = json.loads(entities_json)
         
-        suspects = entities.get("Suspects", [])
+        suspects_data = entities.get("Suspects", [])
+        # Extract suspect names for edge building
+        suspects = [s["name"] for s in suspects_data] if suspects_data else []
+        
         phones = entities.get("Phones", [])
         vehicles = entities.get("Vehicles", [])
         orgs = entities.get("Organizations", [])
@@ -344,7 +331,8 @@ def build_global_graph(fir_rows, watchlist_rows):
             entity_fir_map[ent].add(f"FIR: {fir_no}")
 
         # Add Nodes
-        for s in suspects: G.add_node(s, type="Suspect", color="#EF4444")
+        for s in suspects_data: 
+            G.add_node(s["name"], type="Suspect", color="#EF4444", rank=s.get("rank", "A1"), image=s.get("image", None))
         for p in phones: G.add_node(p, type="Phone", color="#3B82F6")
         for v in vehicles: G.add_node(v, type="Vehicle", color="#F59E0B")
         for o in orgs: G.add_node(o, type="Organization", color="#A855F7")
@@ -368,9 +356,8 @@ def build_global_graph(fir_rows, watchlist_rows):
     # 2. Process Criminal Watchlist Database
     for w in watchlist_rows:
         w_id, name, alias, state, gang, jail_rec, mo, phone, vehicle, face_hash = w
-        w_label = f"WATCHLIST: {name} (Alias: {alias})"
         
-        G.add_node(name, type="Suspect (Watchlist)", color="#DC2626")
+        G.add_node(name, type="Suspect (Watchlist)", color="#DC2626", rank="A1")
         if gang: 
             G.add_node(gang, type="Organization", color="#A855F7")
             G.add_edge(name, gang, relation="GANG_LEADER")
@@ -399,7 +386,7 @@ def build_global_graph(fir_rows, watchlist_rows):
 # SIDEBAR CONTROLS & AUTH
 # -----------------------------------------------------------------------------
 st.sidebar.title("👮 Police Portal Controls")
-st.sidebar.write(f"**Logged in:** Officer (MHA Grid)")
+st.sidebar.write("**Logged in:** Officer (MHA Grid)")
 
 if st.sidebar.button("🔒 Logout"):
     st.session_state["authenticated"] = False
@@ -434,29 +421,32 @@ elif action_mode == "Upload Custom FIR":
     c_state = st.sidebar.selectbox("State / UT (All 36 Available)", list(STATE_COORDINATES.keys()))
     c_station = st.sidebar.text_input("Police Station", "District Central PS")
     fir_text = st.sidebar.text_area("Paste FIR Document / Structured Details", height=200)
-        uploaded_photo = st.sidebar.file_uploader("Upload Suspect Face Photo (Optional)", type=["jpg", "png", "jpeg"])
+    uploaded_photo = st.sidebar.file_uploader("Upload Suspect Face Photo (Optional)", type=["jpg", "png", "jpeg"])
 
-        if st.sidebar.button("Ingest FIR into Database"):
-            if fir_text.strip():
-                # Safely convert image to base64 if uploaded
-                import base64
-                face_b64 = ""
-                if uploaded_photo is not None:
-                    face_b64 = base64.b64encode(uploaded_photo.read()).decode("utf-8")
-                
-                # Extract entities using your existing function
-                data = extract_entities_from_text(fir_text)
-                
-                # Bind face image directly to the A1 Suspect (first suspect in list)
-                if face_b64 and "Suspects" in data and len(data["Suspects"]) > 0:
-                    data["Suspects"][0]["image"] = face_b64
-                
-                # Save structured record into Session State
-                st.session_state['last_ingested_fir'] = data
-                st.sidebar.success("✅ FIR ingested successfully with structured hierarchy!")
+    if st.sidebar.button("Ingest FIR into Database"):
+        if fir_text.strip():
+            # Safely convert image to base64 if uploaded
+            face_b64 = ""
+            face_hash = ""
+            if uploaded_photo is not None:
+                face_b64 = base64.b64encode(uploaded_photo.getvalue()).decode("utf-8")
+                face_hash = generate_image_hash(uploaded_photo)
             
-            insert_fir(c_fir_no, c_state, c_station, txt_content, mo_pattern, extracted, face_hash)
-            st.sidebar.success("FIR filed & biometrics cross-linked in Database!")
+            # Extract entities using your existing function
+            data = extract_entities_from_text(fir_text)
+            
+            # Bind face image directly to the A1 Suspect (first suspect in list)
+            if face_b64 and "Suspects" in data and len(data["Suspects"]) > 0:
+                # Add Streamlit prefix so PyVis can render it
+                file_type = uploaded_photo.type if hasattr(uploaded_photo, 'type') else 'image/png'
+                data["Suspects"][0]["image"] = f"data:{file_type};base64,{face_b64}"
+            
+            # Save structured record into Session State
+            st.session_state['last_ingested_fir'] = data
+            
+            mo_pattern = detect_modus_operandi(fir_text)
+            insert_fir(c_fir_no, c_state, c_station, fir_text, mo_pattern, data, face_hash)
+            st.sidebar.success("✅ FIR filed & biometrics cross-linked in Database!")
             st.rerun()
 
 elif action_mode == "Add Criminal to Watchlist":
@@ -531,7 +521,6 @@ if fir_rows or watchlist_rows:
         rank_colors = {"A1": "#EF4444", "A2": "#F97316", "A3": "#F59E0B", "A4": "#EAB308", "A5": "#84CC16"}
         
         for node, attrs in G.nodes(data=True):
-            # Guard against invalid nodes
             if len(str(node).strip()) <= 1:
                 continue
                 
@@ -539,7 +528,6 @@ if fir_rows or watchlist_rows:
             image_url = attrs.get("image", None)
             rank = attrs.get("rank", "A1")
             
-            # Setup styling per category
             if node_type == "Suspect":
                 color = rank_colors.get(rank, "#EF4444")
                 size = 45 if rank == "A1" else 30
@@ -561,7 +549,6 @@ if fir_rows or watchlist_rows:
                 size = 20
                 label = str(node)
 
-            # Node creation kwargs
             node_kwargs = {
                 "label": label,
                 "color": color,
@@ -570,7 +557,6 @@ if fir_rows or watchlist_rows:
                 "title": f"Category: {node_type}<br>Details: {attrs.get('info', 'Linked to case')}"
             }
 
-            # Embed Face Image on Node if present
             if image_url:
                 node_kwargs["shape"] = "circularImage"
                 node_kwargs["image"] = image_url
@@ -582,84 +568,6 @@ if fir_rows or watchlist_rows:
         for u, v, attrs in G.edges(data=True):
             net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
 
-        # Stable force layout configuration
-        net.force_atlas_2based(
-            gravity=-120,
-            central_gravity=0.015,
-            spring_length=180,
-            spring_strength=0.06,
-            overlap=0.8
-        )
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
-            net.save_graph(tmp.name)
-            tmp_path = tmp.name
-
-        with open(tmp_path, 'r', encoding='utf-8') as f:
-            components.html(f.read(), height=700)
-        os.remove(tmp_path)# TAB 1: KNOWLEDGE GRAPH
-    with t1:
-        st.subheader("Global Entity Relationship Graph")
-        st.caption("Node Types: 🔴 Suspects (A1-A5) | 🟦 Victims | 🟪 Family | 🟢 Witnesses | 🟡 Vehicles | 🔵 Phones | 📍 Locations")
-        
-        net = Network(height="680px", width="100%", bgcolor="#0F172A", font_color="white")
-        
-        # Color mapping by category & suspect hierarchy
-        rank_colors = {"A1": "#EF4444", "A2": "#F97316", "A3": "#F59E0B", "A4": "#EAB308", "A5": "#84CC16"}
-        
-        for node, attrs in G.nodes(data=True):
-            # Guard against invalid nodes
-            if len(str(node).strip()) <= 1:
-                continue
-                
-            node_type = attrs.get("type", "Entity")
-            image_url = attrs.get("image", None)
-            rank = attrs.get("rank", "A1")
-            
-            # Setup styling per category
-            if node_type == "Suspect":
-                color = rank_colors.get(rank, "#EF4444")
-                size = 45 if rank == "A1" else 30
-                label = f"[{rank}] {node}"
-            elif node_type == "Victim":
-                color = "#3B82F6"
-                size = 28
-                label = f"Victim: {node}"
-            elif node_type == "Victim_Family":
-                color = "#A855F7"
-                size = 22
-                label = f"Family: {node}"
-            elif node_type == "Witness":
-                color = "#10B981"
-                size = 22
-                label = f"Witness: {node}"
-            else:
-                color = attrs.get("color", "#94A3B8")
-                size = 20
-                label = str(node)
-
-            # Node creation kwargs
-            node_kwargs = {
-                "label": label,
-                "color": color,
-                "size": size,
-                "borderWidth": 3 if rank == "A1" else 1,
-                "title": f"Category: {node_type}<br>Details: {attrs.get('info', 'Linked to case')}"
-            }
-
-            # Embed Face Image on Node if present
-            if image_url:
-                node_kwargs["shape"] = "circularImage"
-                node_kwargs["image"] = image_url
-            else:
-                node_kwargs["shape"] = "dot"
-
-            net.add_node(node, **node_kwargs)
-
-        for u, v, attrs in G.edges(data=True):
-            net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
-
-        # Stable force layout configuration
         net.force_atlas_2based(
             gravity=-120,
             central_gravity=0.015,
@@ -681,7 +589,6 @@ if fir_rows or watchlist_rows:
         st.subheader("All-India CCTNS Spatial Radar")
         st.caption("Dynamically plots crime occurrence hotspots across all 36 States & UTs.")
         
-        # Aggregate FIR count per State
         state_counts = {}
         for row in fir_rows:
             st_name = row[2]
@@ -743,40 +650,21 @@ if fir_rows or watchlist_rows:
         for row in fir_rows:
             mo = row[6]
             fir = row[1]
-            if mo not in mo_dict: mo_dict[mo] = []
+            if mo not in mo_dict: 
+                mo_dict[mo] = []
             mo_dict[mo].append(fir)
             
-        for w in watchlist_rows:
-            mo = w[6]
-            c_name = f"Watchlist Criminal: {w[1]}"
-            if mo not in mo_dict: mo_dict[mo] = []
-            mo_dict[mo].append(c_name)
-            
-        for mo_pattern, cases in mo_dict.items():
-            if len(cases) > 1:
-                st.warning(f"🎯 **RECURRING MODUS OPERANDI DETECTED:** `{mo_pattern}` linked across: {', '.join(cases)}")
-            else:
-                st.info(f"Pattern: `{mo_pattern}` -> Active in: {cases[0]}")
+        for mo, cases in mo_dict.items():
+            if mo and mo != "Standard Criminal Activity":
+                st.write(f"**{mo}**: {len(cases)} linked cases ➔ {', '.join(cases)}")
 
-    # TAB 5: THREAT ALERTS
+    # TAB 5: HIGH-THREAT ALERTS
     with t5:
-        st.subheader("Cross-Jurisdictional Threat Alerts")
+        st.subheader("🚨 High-Threat Alerts")
+        st.caption("Automatically flags entities (people, phones, vehicles) spotted in multiple jurisdictions or FIRs.")
+        
         if multi_matches:
-            st.error(f"🚨 **CRITICAL CROSS-MATCHES DETECTED:** {len(multi_matches)} entities matched across FIRs & Watchlist DB!")
-            
-            t_data = []
             for ent, sources in multi_matches.items():
-                e_type = G.nodes[ent].get("type", "Unknown") if ent in G.nodes else "Unknown"
-                t_data.append({
-                    "Cross-Linked Entity / Biometric": ent,
-                    "Entity Type": e_type,
-                    "Total Matching Sources": len(sources),
-                    "Matched Databases / FIRs": ", ".join(list(sources)),
-                    "Threat Assessment": "🔴 CRITICAL MATCH (Cross-State / Watchlist Trigger)"
-                })
-            st.dataframe(pd.DataFrame(t_data), use_container_width=True, hide_index=True)
+                st.warning(f"**High-Risk Target Detected:** '{ent}' has been linked across {len(sources)} separate sources: {', '.join(list(sources))}")
         else:
-            st.success("✅ No cross-jurisdictional matches flagged yet.")
-
-else:
-    st.info("👈 Authenticate and use the sidebar to **'Inject Multi-State Demo Data'** or upload custom files.")
+            st.success("No cross-jurisdictional high-threat targets detected currently.")
