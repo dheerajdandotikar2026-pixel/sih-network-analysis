@@ -419,8 +419,8 @@ if fir_rows or watchlist_rows:
         st.subheader("Global Entity Relationship Graph")
         st.caption("Node Types: 🔴 Suspects | 🔵 Phones | 🟡 Vehicles | 🟣 Orgs | 🟢 Locations | 💗 Face Biometrics | 🟧 Modus Operandi")
         
-        # Added select_menu and filter_menu for better user navigation
-        net = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white", select_menu=True, filter_menu=True)
+        # Removed the buggy select/filter menus. Kept it simple and clean.
+        net = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white")
         
         for node, attrs in G.nodes(data=True):
             sources_linked = entity_fir_map.get(node, set())
@@ -441,34 +441,15 @@ if fir_rows or watchlist_rows:
         for u, v, attrs in G.edges(data=True):
             net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
             
-        # THE FIX: Replace net.toggle_physics(True) with this stabilization config
-        net.set_options("""
-        var options = {
-          "physics": {
-            "forceAtlas2Based": {
-              "gravitationalConstant": -150,
-              "centralGravity": 0.015,
-              "springLength": 250,
-              "springConstant": 0.05,
-              "avoidOverlap": 0.8
-            },
-            "minVelocity": 0.75,
-            "solver": "forceAtlas2Based",
-            "stabilization": {
-              "enabled": true,
-              "iterations": 150,
-              "updateInterval": 25,
-              "fit": true
-            }
-          },
-          "edges": {
-            "smooth": {
-              "type": "continuous",
-              "forceDirection": "none"
-            }
-          }
-        }
-        """)
+        # Native PyVis method for stable spacing without raw JS injection
+        net.force_atlas_2based(
+            gravity=-150,
+            central_gravity=0.015,
+            spring_length=150,
+            spring_strength=0.08,
+            damping=0.4,
+            overlap=0.8
+        )
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
             net.save_graph(tmp.name)
