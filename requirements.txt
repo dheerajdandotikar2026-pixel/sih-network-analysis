@@ -9,3 +9,4 @@ networkx>=3.0
 pyvis>=0.3.1
 pandas>=2.0.0
 pydeck>=0.8.0
+Pillow>=10.0.0
