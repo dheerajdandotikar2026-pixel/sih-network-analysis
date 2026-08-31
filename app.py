@@ -482,24 +482,24 @@ if fir_rows or watchlist_rows:
         net = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white")
         
         for node, attrs in G.nodes(data=True):
-    # GUARD: Ignore single-character junk nodes or empty spaces
-    if len(str(node).strip()) <= 1:
-        continue
-        
-    sources_linked = entity_fir_map.get(node, set())
-    is_cross_matched = len(sources_linked) > 1
-    
-    node_size = 38 if is_cross_matched else 20
-    label = f"{node} ★ ({len(sources_linked)} Sources)" if is_cross_matched else node
-    
-    net.add_node(
-        node, 
-        label=label, 
-        color=attrs.get("color", "#CCCCCC"), 
-        size=node_size,
-        borderWidth=3 if is_cross_matched else 1,
-        title=f"Entity: {node}<br>Sources: {', '.join(sources_linked)}"
-    )
+            # GUARD: Ignore single-character junk nodes or empty spaces
+            if len(str(node).strip()) <= 1:
+                continue
+            
+            sources_linked = entity_fir_map.get(node, set())
+            is_cross_matched = len(sources_linked) > 1
+            
+            node_size = 38 if is_cross_matched else 20
+            label = f"{node} ★ ({len(sources_linked)} Sources)" if is_cross_matched else node
+            
+            net.add_node(
+                node, 
+                label=label, 
+                color=attrs.get("color", "#CCCCCC"), 
+                size=node_size,
+                borderWidth=3 if is_cross_matched else 1,
+                title=f"Entity: {node}<br>Sources: {', '.join(sources_linked)}"
+            )
             
         for u, v, attrs in G.edges(data=True):
             net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
