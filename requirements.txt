@@ -4,3 +4,7 @@ pyvis
 groq
 scipy
 numpy
+streamlit>=1.30.0
+networkx>=3.0
+pyvis>=0.3.1
+pandas>=2.0.0
