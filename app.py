@@ -433,7 +433,7 @@ elif action_mode == "Upload Custom FIR":
     c_fir_no = st.sidebar.text_input("FIR Number", "FIR-2026-901")
     c_state = st.sidebar.selectbox("State / UT (All 36 Available)", list(STATE_COORDINATES.keys()))
     c_station = st.sidebar.text_input("Police Station", "District Central PS")
-   fir_text = st.sidebar.text_area("Paste FIR Document / Structured Details", height=200)
+    fir_text = st.sidebar.text_area("Paste FIR Document / Structured Details", height=200)
         uploaded_photo = st.sidebar.file_uploader("Upload Suspect Face Photo (Optional)", type=["jpg", "png", "jpeg"])
 
         if st.sidebar.button("Ingest FIR into Database"):
