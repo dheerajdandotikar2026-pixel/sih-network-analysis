@@ -203,23 +203,24 @@ def detect_modus_operandi(text):
     return "Standard Criminal Activity"
 
 def extract_entities_from_text(text):
-    """Extracts multiple suspects, phone numbers, vehicles, orgs, and locations."""
-    # Find all suspect names
-    suspects_found = re.findall(r'(?:suspect|accused|target|alias|criminal|gangster)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)', text, re.I)
+    """Extracts strictly defined suspects, phone numbers, vehicles, orgs, and locations."""
+    # Stricter Regex: Only extract names explicitly flagged as suspects/accused/etc.
+    suspects_found = re.findall(r'(?:suspect|accused|target|alias|criminal|gangster|arrested|member)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text, re.I)
     
-    # Capitalized full name fallback extractor for gangs
-    all_capitalized = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', text)
+    # (Removed the overly aggressive all_capitalized regex that was causing the "noise")
+    
     stopwords = ["Deccan Logistics", "Mahindra Scorpio", "Police Station", "State Police", "Crime Branch", 
-                 "Brigade Road", "South Tech", "Connaught Place", "Bandra East", "Marina Beach", "First Information"]
+                 "First Information", "Investigation Officer", "Action Taken", "Preliminary Investigation"]
     
-    suspects = list(set([s for s in (suspects_found + all_capitalized) if s not in stopwords]))
+    suspects = list(set([s for s in suspects_found if s not in stopwords]))
     
     entities = {
         "Suspects": suspects,
         "Phones": list(set(re.findall(r'\b[6-9]\d{9}\b', text))),
         "Vehicles": list(set(re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text))),
         "Organizations": list(set([item for sub in re.findall(r"'(.*?)'|\"(.*?)\"", text) for item in sub if item])),
-        "Locations": list(set(re.findall(r'\b(?:near|at|in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text, re.I)))
+        # Strict Location Regex: Must be capitalized words following specific prepositions
+        "Locations": list(set(re.findall(r'\b(?:near|at|in|towards)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text)))
     }
     return entities
 
@@ -418,7 +419,8 @@ if fir_rows or watchlist_rows:
         st.subheader("Global Entity Relationship Graph")
         st.caption("Node Types: 🔴 Suspects | 🔵 Phones | 🟡 Vehicles | 🟣 Orgs | 🟢 Locations | 💗 Face Biometrics | 🟧 Modus Operandi")
         
-        net = Network(height="600px", width="100%", bgcolor="#0F172A", font_color="white")
+        # Added select_menu and filter_menu for better user navigation
+        net = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white", select_menu=True, filter_menu=True)
         
         for node, attrs in G.nodes(data=True):
             sources_linked = entity_fir_map.get(node, set())
@@ -437,16 +439,43 @@ if fir_rows or watchlist_rows:
             )
             
         for u, v, attrs in G.edges(data=True):
-            net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#64748B")
+            net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
             
-        net.toggle_physics(True)
+        # THE FIX: Replace net.toggle_physics(True) with this stabilization config
+        net.set_options("""
+        var options = {
+          "physics": {
+            "forceAtlas2Based": {
+              "gravitationalConstant": -150,
+              "centralGravity": 0.015,
+              "springLength": 250,
+              "springConstant": 0.05,
+              "avoidOverlap": 0.8
+            },
+            "minVelocity": 0.75,
+            "solver": "forceAtlas2Based",
+            "stabilization": {
+              "enabled": true,
+              "iterations": 150,
+              "updateInterval": 25,
+              "fit": true
+            }
+          },
+          "edges": {
+            "smooth": {
+              "type": "continuous",
+              "forceDirection": "none"
+            }
+          }
+        }
+        """)
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
             net.save_graph(tmp.name)
             tmp_path = tmp.name
             
         with open(tmp_path, 'r', encoding='utf-8') as f:
-            components.html(f.read(), height=620)
+            components.html(f.read(), height=670)
         os.remove(tmp_path)
 
     # TAB 2: GEOSPATIAL MAP (DYNAMIC ALL-INDIA PLOTTING)
