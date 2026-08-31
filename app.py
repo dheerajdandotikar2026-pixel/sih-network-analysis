@@ -202,30 +202,48 @@ def detect_modus_operandi(text):
         return "Serial Violent Crime Signature"
     return "Standard Criminal Activity"
 
+import json
+import re
 import requests
 
+def clean_entity_list(data):
+    """Guarantees data is a clean list of valid strings (rejects single characters, numbers, and strings disguised as lists)."""
+    if isinstance(data, str):
+        # If LLM returned a single string, split by commas or wrap in a list
+        data = [s.strip() for s in data.split(",") if s.strip()]
+    if not isinstance(data, list):
+        return []
+    
+    cleaned = []
+    stop_words = {
+        "has been", "the time", "the shape", "official note", "action taken", 
+        "preliminary investigation", "complainant details", "nature of offence"
+    }
+    
+    for item in data:
+        if not isinstance(item, str):
+            continue
+        item = item.strip().strip('"' + "'")
+        # Reject single letters, standalone digits, stop words, or excessively long sentences
+        if len(item) > 1 and item.lower() not in stop_words and not item.isdigit() and len(item) < 60:
+            cleaned.append(item)
+            
+    return list(set(cleaned))
+
+
 def extract_entities_from_text(text):
-    """Uses local Llama 3 (via Ollama API) to extract precise criminal entities into JSON.
-    Includes a noise-sanitized fallback if local LLM is unreachable.
-    """
+    """Uses local Llama 3 with strict validation. Falls back to sanitized regex if Llama 3 is offline."""
+    
     prompt = f"""
-You are an expert CCTNS Police Intelligence NLP Engine.
-Extract criminal entities from the following FIR text and return strictly a valid JSON object.
+You are a police intelligence extraction engine. Extract key entities from this FIR document.
+Return ONLY a valid JSON object matching this schema EXACTLY:
 
-Rules:
-1. "Suspects": Extract full names of suspects, accused persons, complainants, witnesses, or named animals/aliases mentioned. Do NOT include common verbs or generic words.
-2. "Phones": Extract 10-digit telephone/mobile numbers.
-3. "Vehicles": Extract vehicle registration/license numbers or descriptions.
-4. "Organizations": Extract names of gangs, companies, or specific equipment/objects in quotes.
-5. "Locations": Extract distinct places, wards, cities, or police stations.
-
-Return ONLY the raw JSON string matching this exact schema:
 {{
-    "Suspects": [],
-    "Phones": [],
-    "Vehicles": [],
-    "Organizations": [],
-    "Locations": []
+    "Suspects": ["Name 1", "Name 2"],
+    "Phones": ["Phone number"],
+    "Vehicles": ["Vehicle registration"],
+    "Organizations": ["Organization name"],
+    "Locations": ["City or Place"]
 }}
 
 FIR Text:
@@ -233,57 +251,37 @@ FIR Text:
 {text}
 \"\"\"
 """
-
-    # 1. Attempt Local Llama 3 Extraction
+    entities = {"Suspects": [], "Phones": [], "Vehicles": [], "Organizations": [], "Locations": []}
+    
+    # 1. Primary: Local Llama 3 via Ollama
     try:
-        response = requests.post(
+        res = requests.post(
             "http://localhost:11434/api/generate",
-            json={
-                "model": "llama3",
-                "prompt": prompt,
-                "stream": False,
-                "format": "json"
-            },
-            timeout=12
+            json={"model": "llama3", "prompt": prompt, "stream": False, "format": "json"},
+            timeout=10
         )
-        if response.status_code == 200:
-            result_str = response.json().get("response", "{}")
-            extracted = json.loads(result_str)
-            
-            # Ensure all required keys exist
-            return {
-                "Suspects": extracted.get("Suspects", []),
-                "Phones": extracted.get("Phones", []),
-                "Vehicles": extracted.get("Vehicles", []),
-                "Organizations": extracted.get("Organizations", []),
-                "Locations": extracted.get("Locations", [])
-            }
-    except Exception as e:
-        st.warning(f"⚠️ Local Llama 3 API offline or unreachable. Using sanitized fallback engine.")
+        if res.status_code == 200:
+            raw_json = json.loads(res.json().get("response", "{}"))
+            for key in entities:
+                entities[key] = clean_entity_list(raw_json.get(key, []))
+            return entities
+    except Exception:
+        pass  # Fallback to strict regex engine below if Ollama is unreachable
 
-    # 2. Strict Fallback Engine (Discards English Verbs & Common Noun Phrases)
-    stop_words = {
-        "has been", "the time", "the shape", "approximately", "investigation", 
-        "action taken", "preliminary investigation", "the complainant", "witness statements",
-        "offences under", "official note", "complainant details", "nature of offence"
-    }
+    # 2. Fallback: Sanitized Regex Extraction
+    people = re.findall(r'(?:Name|Complainant|Witness|Suspect|Accused|Officer|known as)\s*:?\s*["“]?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)["”]?', text, re.I)
+    phones = re.findall(r'\b[6-9]\d{9}\b', text)
+    vehicles = re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text)
+    quotes = re.findall(r'["“](.*?)["”]', text)
+    locations = re.findall(r'\b(?:District|Station|Ward|at|near)\s*:?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text)
 
-    # Extract potential names following specific roles
-    raw_people = re.findall(r'(?:Name|Complainant|Witness|Officer|Suspect|Accused|known as)\s*:?\s*["“]?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)["”]?', text, re.I)
-    cleaned_people = [p.strip() for p in raw_people if p.lower() not in stop_words and len(p.split()) <= 3]
+    entities["Suspects"] = clean_entity_list(people)
+    entities["Phones"] = clean_entity_list(phones)
+    entities["Vehicles"] = clean_entity_list(vehicles)
+    entities["Organizations"] = clean_entity_list(quotes)
+    entities["Locations"] = clean_entity_list(locations)
 
-    phones = list(set(re.findall(r'\b[6-9]\d{9}\b', text)))
-    vehicles = list(set(re.findall(r'\b[A-Z]{2}[-\s]?\d{2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}\b', text)))
-    quotes = list(set([item for sub in re.findall(r'["“](.*?)["”]', text) for item in sub if item and len(item) < 40]))
-    locations = list(set(re.findall(r'\b(?:District|Station|Ward|at|near)\s*:?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', text)))
-
-    return {
-        "Suspects": list(set(cleaned_people)),
-        "Phones": phones,
-        "Vehicles": vehicles,
-        "Organizations": quotes,
-        "Locations": [loc for loc in locations if loc.lower() not in stop_words]
-    }
+    return entities
 
 def build_global_graph(fir_rows, watchlist_rows):
     """Integrates FIRs, Watchlist profiles, Photos, and Modus Operandi into Knowledge Graph."""
@@ -484,20 +482,24 @@ if fir_rows or watchlist_rows:
         net = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white")
         
         for node, attrs in G.nodes(data=True):
-            sources_linked = entity_fir_map.get(node, set())
-            is_cross_matched = len(sources_linked) > 1
-            
-            node_size = 38 if is_cross_matched else 20
-            label = f"{node} ★ ({len(sources_linked)} Sources)" if is_cross_matched else node
-            
-            net.add_node(
-                node, 
-                label=label, 
-                color=attrs.get("color", "#CCCCCC"), 
-                size=node_size,
-                borderWidth=3 if is_cross_matched else 1,
-                title=f"Entity: {node}<br>Sources: {', '.join(sources_linked)}"
-            )
+    # GUARD: Ignore single-character junk nodes or empty spaces
+    if len(str(node).strip()) <= 1:
+        continue
+        
+    sources_linked = entity_fir_map.get(node, set())
+    is_cross_matched = len(sources_linked) > 1
+    
+    node_size = 38 if is_cross_matched else 20
+    label = f"{node} ★ ({len(sources_linked)} Sources)" if is_cross_matched else node
+    
+    net.add_node(
+        node, 
+        label=label, 
+        color=attrs.get("color", "#CCCCCC"), 
+        size=node_size,
+        borderWidth=3 if is_cross_matched else 1,
+        title=f"Entity: {node}<br>Sources: {', '.join(sources_linked)}"
+    )
             
         for u, v, attrs in G.edges(data=True):
             net.add_edge(u, v, title=attrs.get("relation", "LINKED"), color="#475569")
