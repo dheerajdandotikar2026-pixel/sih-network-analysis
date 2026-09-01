@@ -22,15 +22,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# DARK MODE COMPATIBLE CSS
 st.markdown("""
 <style>
-    .main-header { font-size: 2.1rem; font-weight: 800; color: #0F172A; margin-bottom: 0px; }
-    .sub-header { font-size: 0.95rem; color: #64748B; margin-bottom: 20px; font-weight: 500; }
-    .stMetric { background-color: #F8FAFC; padding: 12px; border-radius: 8px; border-left: 5px solid #2563EB; box-shadow: 0 2px 4px rgb(0 0 0 / 0.05); }
-    .form-container { background-color: #F8FAFC; padding: 20px; border-radius: 10px; border: 1px solid #E2E8F0; margin-bottom: 15px;}
-    .login-box { max-width: 420px; margin: 80px auto; padding: 30px; background: #FFFFFF; border-radius: 10px; border: 1px solid #E2E8F0; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
-    .match-card { background-color: #FEF2F2; border-left: 5px solid #EF4444; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
-    .match-card-success { background-color: #F0FDF4; border-left: 5px solid #22C55E; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+    .main-header { font-size: 2.1rem; font-weight: 800; margin-bottom: 0px; }
+    .sub-header { font-size: 0.95rem; margin-bottom: 20px; font-weight: 500; opacity: 0.8; }
+    .stMetric { background-color: rgba(128, 128, 128, 0.1); padding: 12px; border-radius: 8px; border-left: 5px solid #2563EB; box-shadow: 0 2px 4px rgb(0 0 0 / 0.05); }
+    .form-container { background-color: rgba(128, 128, 128, 0.05); padding: 20px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); margin-bottom: 15px;}
+    .login-box { max-width: 420px; margin: 80px auto; padding: 30px; background-color: rgba(128, 128, 128, 0.05); border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+    .match-card { background-color: rgba(239, 68, 68, 0.1); border-left: 5px solid #EF4444; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+    .match-card-success { background-color: rgba(34, 197, 94, 0.1); border-left: 5px solid #22C55E; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,10 +89,10 @@ if not st.session_state["authenticated"]:
 def init_db():
     conn = sqlite3.connect('cctns_master.db')
     c = conn.cursor()
-    # DB 1: FIR Records
+    # DB 1: FIR Records (Added property_reg_json)
     c.execute('''CREATE TABLE IF NOT EXISTS fir_records
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, fir_no TEXT UNIQUE, state TEXT, police_station TEXT, 
-                  timestamp TEXT, text_content TEXT, mo_pattern TEXT, entities_json TEXT, face_hash TEXT, account_numbers_json TEXT)''')
+                  timestamp TEXT, text_content TEXT, mo_pattern TEXT, entities_json TEXT, face_hash TEXT, account_numbers_json TEXT, property_reg_json TEXT)''')
     
     # DB 2: Criminal Watchlist
     c.execute('''CREATE TABLE IF NOT EXISTS criminal_watchlist
@@ -112,7 +113,7 @@ def upgrade_db():
     for col, dtype in [("watchlist_id", "TEXT"), ("aadhaar", "TEXT"), ("pan", "TEXT"), ("address", "TEXT")]:
         try: c.execute(f"ALTER TABLE criminal_watchlist ADD COLUMN {col} {dtype}")
         except sqlite3.OperationalError: pass
-    for col, dtype in [("account_numbers_json", "TEXT")]:
+    for col, dtype in [("account_numbers_json", "TEXT"), ("property_reg_json", "TEXT")]:
         try: c.execute(f"ALTER TABLE fir_records ADD COLUMN {col} {dtype}")
         except sqlite3.OperationalError: pass
     conn.commit()
@@ -122,12 +123,12 @@ init_db()
 upgrade_db()
 
 # Database Helper Functions
-def insert_fir(fir_no, state, station, text, mo_pattern, entities, face_hash="", accounts=[]):
+def insert_fir(fir_no, state, station, text, mo_pattern, entities, face_hash="", accounts=[], properties=[]):
     conn = sqlite3.connect('cctns_master.db')
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""INSERT INTO fir_records (fir_no, state, police_station, timestamp, text_content, mo_pattern, entities_json, face_hash, account_numbers_json) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (fir_no, state, station, now, text, mo_pattern, json.dumps(entities), face_hash, json.dumps(accounts)))
+    c.execute("""INSERT INTO fir_records (fir_no, state, police_station, timestamp, text_content, mo_pattern, entities_json, face_hash, account_numbers_json, property_reg_json) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (fir_no, state, station, now, text, mo_pattern, json.dumps(entities), face_hash, json.dumps(accounts), json.dumps(properties)))
     conn.commit()
     conn.close()
 
@@ -155,7 +156,7 @@ def insert_investigation_report(rep_code, rep_type, fir_no, person_obs, loc, veh
 def get_all_firs():
     conn = sqlite3.connect('cctns_master.db')
     c = conn.cursor()
-    c.execute("SELECT id, fir_no, state, police_station, timestamp, text_content, mo_pattern, entities_json, face_hash, account_numbers_json FROM fir_records ORDER BY id DESC")
+    c.execute("SELECT id, fir_no, state, police_station, timestamp, text_content, mo_pattern, entities_json, face_hash, account_numbers_json, property_reg_json FROM fir_records ORDER BY id DESC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -206,7 +207,6 @@ def fir_exists(fir_no):
 # GRAPH STABILIZATION ENGINE (FIXES CONTINUOUS ROTATION BUG)
 # -----------------------------------------------------------------------------
 def render_pyvis_graph(net, height="750px"):
-    # Inject Vis.js freeze script once layout stabilizes to eliminate spinning
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
         net.save_graph(tmp.name)
         with open(tmp.name, 'r', encoding='utf-8') as f:
@@ -319,17 +319,17 @@ if action_mode == "📊 Main Dashboard & Advanced Graphs":
     ])
 
     # -------------------------------------------------------------------------
-    # TAB 1: MAIN KNOWLEDGE GRAPH (MO REMOVED AS ENTITY)
+    # TAB 1: MAIN KNOWLEDGE GRAPH
     # -------------------------------------------------------------------------
     with graph_tab1:
         st.subheader("Global Entity Relationship Graph")
-        st.caption("Modus Operandi entities removed from graph nodes per specification. Rotation bug permanently resolved.")
+        # DEVELOPER NOTE TEXT REMOVED FROM HERE
         search_graph_fir = st.text_input("🔍 Filter Network by Specific FIR Number (Leave blank for full grid):", key="kg_fir_srch")
         
         if fir_rows or watchlist_rows:
             G = nx.Graph()
             for row in fir_rows:
-                _, fir_no, state, station, timestamp, text, mo_pattern, entities_json, face_hash, acc_json = row
+                _, fir_no, state, station, timestamp, text, mo_pattern, entities_json, face_hash, acc_json, prop_json = row
                 fir_no = fir_no.upper()
                 entities = json.loads(entities_json)
                 G.add_node(fir_no, type="FIR Record", color="#14B8A6", size=45, title=f"Case: {fir_no}\nStation: {station}")
@@ -389,7 +389,7 @@ if action_mode == "📊 Main Dashboard & Advanced Graphs":
                     G = G.subgraph(connected).copy()
                 else: G = nx.Graph()
 
-            net = Network(height="750px", width="100%", bgcolor="#0F172A", font_color="white")
+            net = Network(height="750px", width="100%", bgcolor="transparent", font_color="inherit")
             net.set_options("""{"physics":{"solver":"forceAtlas2Based","forceAtlas2Based":{"gravitationalConstant":-50,"centralGravity":0.01,"springLength":100},"stabilization":{"iterations":1200}}}""")
             
             for node, attrs in G.nodes(data=True):
@@ -460,7 +460,7 @@ if action_mode == "📊 Main Dashboard & Advanced Graphs":
                     HG.add_edge(prev_node, m_label, label=edge_lbl)
                     prev_node = m_label
 
-            net_g = Network(height="700px", width="100%", bgcolor="#0F172A", font_color="white", directed=True)
+            net_g = Network(height="700px", width="100%", bgcolor="transparent", font_color="inherit", directed=True)
             for node, attrs in HG.nodes(data=True):
                 kwargs = {"label": str(node), "color": attrs.get("color", "#8B5CF6"), "size": attrs.get("size", 30)}
                 if attrs.get("image"): kwargs.update({"shape": "circularImage", "image": attrs["image"]})
@@ -511,7 +511,7 @@ if action_mode == "📊 Main Dashboard & Advanced Graphs":
                     SHG.add_edge(parent, label, label=rel)
                     parent = label
                 
-                net_s = Network(height="650px", width="100%", bgcolor="#0F172A", font_color="white", directed=True)
+                net_s = Network(height="650px", width="100%", bgcolor="transparent", font_color="inherit", directed=True)
                 for node, attrs in SHG.nodes(data=True):
                     kwargs = {"label": str(node), "color": attrs.get("color", "#14B8A6"), "size": attrs.get("size", 30)}
                     if attrs.get("image"): kwargs.update({"shape": "circularImage", "image": attrs["image"]})
@@ -561,7 +561,7 @@ if action_mode == "📊 Main Dashboard & Advanced Graphs":
                 RG.add_node(fir, color="#14B8A6", size=20)
                 RG.add_edge(lbl, fir, label="LINKED_CASE")
 
-        net_r = Network(height="700px", width="100%", bgcolor="#0F172A", font_color="white")
+        net_r = Network(height="700px", width="100%", bgcolor="transparent", font_color="inherit")
         for node, attrs in RG.nodes(data=True):
             kwargs = {"label": str(node), "color": attrs.get("color", "#D97706"), "size": attrs.get("size", 25)}
             if attrs.get("image"): kwargs.update({"shape": "circularImage", "image": attrs["image"]})
@@ -598,7 +598,7 @@ if action_mode == "📊 Main Dashboard & Advanced Graphs":
 # =============================================================================
 elif action_mode == "📝 File Custom FIR (Structured)":
     st.header("📝 File New Custom FIR")
-    st.caption("Supports Suspects, Witnesses, Multiple Victims, and Financial Account Numbers.")
+    st.caption("Supports Suspects, Witnesses, Multiple Victims, Accounts, and Properties.")
     
     with st.container():
         st.markdown('<div class="form-container">', unsafe_allow_html=True)
@@ -611,7 +611,10 @@ elif action_mode == "📝 File Custom FIR (Structured)":
         
         st.markdown("---")
         st.subheader("💳 Linked Financial Bank Accounts")
-        c_accounts_str = st.text_input("Enter Account Numbers (Comma-separated for multiple accounts)", "987654321011, 456789123012")
+        c_accounts_str = st.text_input("Enter Account Numbers (Comma-separated for multiple)", "")
+        
+        st.subheader("🏢 Linked Properties")
+        c_properties_str = st.text_input("Enter Property Registration Numbers (Comma-separated for multiple)", "")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Suspects Section
@@ -635,7 +638,7 @@ elif action_mode == "📝 File Custom FIR (Structured)":
         st.session_state.suspect_count += 1
         st.rerun()
 
-    # Victims Section (Newly Added per Specification)
+    # Victims Section
     st.subheader("🔵 Victims Section")
     victims_collected = []
     for i in range(st.session_state.victim_count):
@@ -706,6 +709,8 @@ elif action_mode == "📝 File Custom FIR (Structured)":
             st.error(f"❌ Duplicate Error: FIR Number '{c_fir_no.upper()}' already exists.")
         else:
             acc_list = [a.strip() for a in c_accounts_str.split(",") if a.strip()]
+            prop_list = [p.strip() for p in c_properties_str.split(",") if p.strip()]
+            
             structured_entities = {
                 "Suspects": suspects_collected, "Witnesses": witnesses_collected,
                 "Victims": victims_collected, "Vehicles": vehicles_collected, 
@@ -713,7 +718,7 @@ elif action_mode == "📝 File Custom FIR (Structured)":
             }
             mo_pattern = detect_modus_operandi(fir_text)
             primary_hash = suspects_collected[0].get("face_hash", "") if suspects_collected else ""
-            insert_fir(c_fir_no.upper(), c_state, c_station, fir_text, mo_pattern, structured_entities, primary_hash, acc_list)
+            insert_fir(c_fir_no.upper(), c_state, c_station, fir_text, mo_pattern, structured_entities, primary_hash, acc_list, prop_list)
             st.success(f"✅ FIR {c_fir_no.upper()} ingested successfully into database!")
 
 # =============================================================================
@@ -850,7 +855,6 @@ elif action_mode == "🔍 Investigation Reports (3rd DB)":
 
             all_firs = get_all_firs()
             all_watch = get_all_watchlist()
-            all_reps = get_all_reports()
 
             matched_records = []
             for ph in phone_list:
@@ -937,6 +941,7 @@ elif action_mode == "📂 View Master Databases":
                 st.write(f"**Timestamp:** {r[4]}")
                 st.write(f"**Narrative:** {r[5]}")
                 st.write(f"**Bank Accounts:** {r[9]}")
+                st.write(f"**Property Registrations:** {r[10]}")
                 entities = json.loads(r[7])
                 st.json(entities)
                 dpass = st.text_input("Password", type="password", key=f"df_p_{r[0]}")
