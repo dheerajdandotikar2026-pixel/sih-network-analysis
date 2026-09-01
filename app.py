@@ -4,7 +4,6 @@ import pandas as pd
 import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
-import re
 import tempfile
 import os
 import sqlite3
@@ -12,7 +11,6 @@ import json
 import pydeck as pdk
 import hashlib
 from datetime import datetime
-from PIL import Image
 
 # -----------------------------------------------------------------------------
 # PAGE CONFIGURATION & STYLING
@@ -83,19 +81,42 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # -----------------------------------------------------------------------------
-# DUAL DATABASE ENGINE
+# DUAL DATABASE ENGINE (WITH SCHEMA UPGRADES)
 # -----------------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect('cctns_master.db')
     c = conn.cursor()
+    # Create tables if they do not exist
     c.execute('''CREATE TABLE IF NOT EXISTS fir_records
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, fir_no TEXT, state TEXT, police_station TEXT, 
                   timestamp TEXT, text_content TEXT, mo_pattern TEXT, entities_json TEXT, face_hash TEXT)''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS criminal_watchlist
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, alias TEXT, state TEXT, gang_affiliation TEXT, 
                   past_jail_record TEXT, mo_pattern TEXT, phone TEXT, vehicle TEXT, face_hash TEXT, image_b64 TEXT)''')
     conn.commit()
     conn.close()
+
+def upgrade_db():
+    # Safely injects new columns if upgrading from the old version
+    conn = sqlite3.connect('cctns_master.db')
+    c = conn.cursor()
+    new_cols = [
+        ("criminal_watchlist", "watchlist_id", "TEXT"),
+        ("criminal_watchlist", "aadhaar", "TEXT"),
+        ("criminal_watchlist", "pan", "TEXT"),
+        ("criminal_watchlist", "address", "TEXT")
+    ]
+    for table, col, dtype in new_cols:
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
+        except sqlite3.OperationalError:
+            pass # Column already exists
+    conn.commit()
+    conn.close()
+
+init_db()
+upgrade_db()
 
 def insert_fir(fir_no, state, station, text, mo_pattern, entities, face_hash=""):
     conn = sqlite3.connect('cctns_master.db')
@@ -106,13 +127,13 @@ def insert_fir(fir_no, state, station, text, mo_pattern, entities, face_hash="")
     conn.commit()
     conn.close()
 
-def insert_watchlist_criminal(name, alias, state, gang, jail_record, mo_pattern, phone, vehicle, face_hash, img_b64):
+def insert_watchlist_criminal(wl_id, name, alias, state, gang, jail_record, mo_pattern, phone, vehicle, face_hash, img_b64, aadhaar, pan, address):
     conn = sqlite3.connect('cctns_master.db')
     c = conn.cursor()
     c.execute("""INSERT INTO criminal_watchlist 
-                 (name, alias, state, gang_affiliation, past_jail_record, mo_pattern, phone, vehicle, face_hash, image_b64) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
-              (name, alias, state, gang, jail_record, mo_pattern, phone, vehicle, face_hash, img_b64))
+                 (watchlist_id, name, alias, state, gang_affiliation, past_jail_record, mo_pattern, phone, vehicle, face_hash, image_b64, aadhaar, pan, address) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
+              (wl_id, name, alias, state, gang, jail_record, mo_pattern, phone, vehicle, face_hash, img_b64, aadhaar, pan, address))
     conn.commit()
     conn.close()
 
@@ -127,12 +148,30 @@ def get_all_firs():
 def get_all_watchlist():
     conn = sqlite3.connect('cctns_master.db')
     c = conn.cursor()
-    c.execute("SELECT * FROM criminal_watchlist ORDER BY id DESC")
+    c.execute("SELECT id, watchlist_id, name, alias, state, gang_affiliation, past_jail_record, mo_pattern, phone, vehicle, face_hash, image_b64, aadhaar, pan, address FROM criminal_watchlist ORDER BY id DESC")
     rows = c.fetchall()
     conn.close()
     return rows
 
-init_db()
+def delete_fir(record_id):
+    conn = sqlite3.connect('cctns_master.db')
+    conn.execute("DELETE FROM fir_records WHERE id=?", (record_id,))
+    conn.commit()
+    conn.close()
+
+def delete_watchlist(record_id):
+    conn = sqlite3.connect('cctns_master.db')
+    conn.execute("DELETE FROM criminal_watchlist WHERE id=?", (record_id,))
+    conn.commit()
+    conn.close()
+
+def fir_exists(fir_no):
+    conn = sqlite3.connect('cctns_master.db')
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM fir_records WHERE UPPER(fir_no) = UPPER(?)", (fir_no,))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS
@@ -183,14 +222,19 @@ action_mode = st.sidebar.radio("Navigation Menu:", [
 ])
 
 st.sidebar.markdown("---")
+st.sidebar.write("**Admin Controls**")
+wipe_pass = st.sidebar.text_input("Database Reset Password", type="password")
 if st.sidebar.button("⚠️ Wipe Master Database"):
-    conn = sqlite3.connect('cctns_master.db')
-    conn.execute("DELETE FROM fir_records")
-    conn.execute("DELETE FROM criminal_watchlist")
-    conn.commit()
-    conn.close()
-    st.sidebar.warning("Database reset complete.")
-    st.rerun()
+    if wipe_pass == "9876":
+        conn = sqlite3.connect('cctns_master.db')
+        conn.execute("DELETE FROM fir_records")
+        conn.execute("DELETE FROM criminal_watchlist")
+        conn.commit()
+        conn.close()
+        st.sidebar.success("Database reset complete.")
+        st.rerun()
+    else:
+        st.sidebar.error("Unauthorized. Incorrect Password.")
 
 st.markdown('<div class="main-header">🛡️ CCTNS AI Criminal Network & Intelligence Grid</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">All-India Multi-Entity Intelligence Grid (Structured Data Engine)</div>', unsafe_allow_html=True)
@@ -206,14 +250,14 @@ if action_mode == "📊 Main Dashboard (Graph & Maps)":
     m1, m2, m3 = st.columns(3)
     m1.metric("Total FIRs Ingested", len(fir_rows))
     m2.metric("Watchlist Criminals", len(watchlist_rows))
-    m3.metric("Live Intelligence Nodes", len(fir_rows) * 5 + len(watchlist_rows) * 3) # Approx nodes
+    m3.metric("Live Intelligence Nodes", len(fir_rows) * 6 + len(watchlist_rows) * 3)
     st.markdown("---")
 
     t1, t2 = st.tabs(["🕸️ Knowledge Graph", "🗺️ All-India CCTNS Geospatial Map"])
 
     with t1:
         st.subheader("Global Entity Relationship Graph")
-        st.caption("Relationships (strings) between entities are explicitly labeled. Zoom and drag nodes to explore networks.")
+        search_graph_fir = st.text_input("🔍 Filter Network by Specific FIR Number (Leave blank for full grid):")
         
         if fir_rows or watchlist_rows:
             G = nx.Graph()
@@ -221,75 +265,130 @@ if action_mode == "📊 Main Dashboard (Graph & Maps)":
             # Process FIRs
             for row in fir_rows:
                 f_id, fir_no, state, station, timestamp, text, mo_pattern, entities_json, face_hash = row
+                fir_no = fir_no.upper()
                 entities = json.loads(entities_json)
+                
+                # Add Central FIR Node
+                G.add_node(fir_no, type="FIR Record", color="#14B8A6", size=45, title=f"Case: {fir_no}\nStation: {station}")
                 
                 suspects_data = entities.get("Suspects", [])
                 witnesses_data = entities.get("Witnesses", [])
                 vehicles_data = entities.get("Vehicles", [])
                 locations = entities.get("Locations", [])
                 
-                # Nodes
+                # Nodes & Edges
                 for s in suspects_data:
-                    G.add_node(s["name"], type="Suspect", rank=s.get("rank", "A1"), image=s.get("image"))
-                    if s.get("phone"): G.add_node(s["phone"], type="Phone", color="#3B82F6")
-                    if s.get("face_hash"): G.add_node(s["face_hash"], type="Face Biometric", color="#EC4899")
-                
-                for w in witnesses_data:
-                    G.add_node(w["name"], type="Witness", color="#10B981")
-                    if w.get("phone"): G.add_node(w["phone"], type="Phone", color="#3B82F6")
+                    s_name = s["name"]
+                    G.add_node(s_name, type="Suspect", rank=s.get("rank", "A1"), image=s.get("image"))
+                    G.add_edge(fir_no, s_name, relation="ACCUSED_IN")
                     
-                for v in vehicles_data: G.add_node(v["plate"], type="Vehicle", color="#F59E0B", image=v.get("image"))
-                for l in locations: G.add_node(l, type="Location", color="#8B5CF6")
-                if mo_pattern: G.add_node(f"MO: {mo_pattern}", type="Modus Operandi", color="#F97316")
-                
-                # Edges (With labels)
-                s_names = [s["name"] for s in suspects_data]
-                for s_name in s_names:
-                    s_dict = next(item for item in suspects_data if item["name"] == s_name)
-                    if s_dict.get("phone"): G.add_edge(s_name, s_dict["phone"], relation="OWNS_PHONE")
-                    if s_dict.get("face_hash"): G.add_edge(s_name, s_dict["face_hash"], relation="FACE_MATCH")
+                    if s.get("phone"): 
+                        G.add_node(s["phone"], type="Phone", color="#3B82F6")
+                        G.add_edge(s_name, s["phone"], relation="OWNS_PHONE")
+                    if s.get("face_hash"): 
+                        G.add_node(s["face_hash"], type="Face Biometric", color="#EC4899")
+                        G.add_edge(s_name, s["face_hash"], relation="FACE_MATCH")
                     
-                    for v in vehicles_data: G.add_edge(s_name, v["plate"], relation=f"LINKED_VEHICLE [{fir_no}]")
+                    for v in vehicles_data: G.add_edge(s_name, v["plate"], relation=f"LINKED_VEHICLE")
                     for l in locations: G.add_edge(s_name, l, relation=f"SEEN_AT")
                     if mo_pattern: G.add_edge(s_name, f"MO: {mo_pattern}", relation=f"OPERATES_BY")
                     for w in witnesses_data: G.add_edge(s_name, w["name"], relation=f"WITNESSED_BY")
 
+                for w in witnesses_data:
+                    G.add_node(w["name"], type="Witness", color="#10B981")
+                    G.add_edge(fir_no, w["name"], relation="WITNESS_IN")
+                    if w.get("phone"): 
+                        G.add_node(w["phone"], type="Phone", color="#3B82F6")
+                        G.add_edge(w["name"], w["phone"], relation="OWNS_PHONE")
+                    
+                for v in vehicles_data: 
+                    G.add_node(v["plate"], type="Vehicle", color="#F59E0B", image=v.get("image"))
+                    G.add_edge(fir_no, v["plate"], relation="LOGGED_VEHICLE")
+                    
+                for l in locations: 
+                    G.add_node(l, type="Location", color="#8B5CF6")
+                    G.add_edge(fir_no, l, relation="CRIME_SCENE")
+                    
+                if mo_pattern: 
+                    G.add_node(f"MO: {mo_pattern}", type="Modus Operandi", color="#F97316")
+                    G.add_edge(fir_no, f"MO: {mo_pattern}", relation="CASE_MO")
+                
+                s_names = [s["name"] for s in suspects_data]
                 for i in range(len(s_names)):
                     for j in range(i + 1, len(s_names)):
                         G.add_edge(s_names[i], s_names[j], relation=f"CO_ACCUSED")
 
             # Process Watchlist
             for w in watchlist_rows:
-                w_id, name, alias, state, gang, jail_rec, mo, phone, vehicle, face_hash, img_b64 = w
-                G.add_node(name, type="Suspect (Watchlist)", color="#DC2626", rank="A1", image=img_b64)
+                w_id, wl_id, name, alias, state, gang, jail_rec, mo, phone, vehicle, face_hash, img_b64, aadhaar, pan, address = w
+                wl_label = f"{name}\n({wl_id})" if wl_id else name
+                G.add_node(wl_label, type="Suspect (Watchlist)", color="#DC2626", rank="A1", image=img_b64, title=f"Watchlist: {wl_id}\nAlias: {alias}")
                 if gang: 
                     G.add_node(gang, type="Organization", color="#A855F7")
-                    G.add_edge(name, gang, relation="GANG_LEADER")
+                    G.add_edge(wl_label, gang, relation="GANG_LEADER")
                 if phone: 
                     G.add_node(phone, type="Phone", color="#3B82F6")
-                    G.add_edge(name, phone, relation="KNOWN_PHONE")
+                    G.add_edge(wl_label, phone, relation="KNOWN_PHONE")
                 if vehicle: 
                     G.add_node(vehicle, type="Vehicle", color="#F59E0B")
-                    G.add_edge(name, vehicle, relation="KNOWN_VEHICLE")
+                    G.add_edge(wl_label, vehicle, relation="KNOWN_VEHICLE")
                 if mo: 
                     G.add_node(f"MO: {mo}", type="Modus Operandi", color="#F97316")
-                    G.add_edge(name, f"MO: {mo}", relation="KNOWN_MO")
+                    G.add_edge(wl_label, f"MO: {mo}", relation="KNOWN_MO")
+
+            # Graph Sub-Filter logic
+            if search_graph_fir:
+                search_graph_fir = search_graph_fir.strip().upper()
+                if search_graph_fir in G.nodes:
+                    connected_nodes = nx.node_connected_component(G, search_graph_fir)
+                    G = G.subgraph(connected_nodes).copy()
+                else:
+                    st.warning("⚠️ FIR Number not found in the graph. Showing empty grid.")
+                    G = nx.Graph()
 
             net = Network(height="750px", width="100%", bgcolor="#0F172A", font_color="white")
+            
+            # BUG FIX: Stop infinite rotation using stabilization options
+            net.set_options("""
+            var options = {
+              "physics": {
+                "forceAtlas2Based": {
+                  "gravitationalConstant": -100,
+                  "centralGravity": 0.01,
+                  "springLength": 150,
+                  "springConstant": 0.08,
+                  "damping": 0.4,
+                  "avoidOverlap": 0.5
+                },
+                "minVelocity": 0.75,
+                "solver": "forceAtlas2Based",
+                "stabilization": {
+                  "enabled": true,
+                  "iterations": 1000,
+                  "updateInterval": 100,
+                  "onlyDynamicEdges": false,
+                  "fit": true
+                }
+              }
+            }
+            """)
+            
             rank_colors = {"A1": "#EF4444", "A2": "#F97316", "A3": "#F59E0B"}
             
             for node, attrs in G.nodes(data=True):
                 node_type = attrs.get("type", "Entity")
                 image_url = attrs.get("image", None)
+                title_tooltip = attrs.get("title", f"Type: {node_type}")
                 
-                if "Suspect" in node_type: color, size = rank_colors.get(attrs.get("rank", "A1"), "#EF4444"), 40
+                if "FIR Record" in node_type: color, size = "#14B8A6", 45
+                elif "Suspect" in node_type: color, size = rank_colors.get(attrs.get("rank", "A1"), "#EF4444"), 40
                 elif node_type == "Vehicle": color, size = "#F59E0B", 25
                 elif node_type == "Phone": color, size = "#3B82F6", 20
                 elif node_type == "Witness": color, size = "#10B981", 25
                 elif node_type == "Location": color, size = "#8B5CF6", 25
                 else: color, size = attrs.get("color", "#94A3B8"), 20
 
-                node_kwargs = {"label": str(node), "color": color, "size": size, "title": f"{node_type}"}
+                node_kwargs = {"label": str(node), "color": color, "size": size, "title": title_tooltip}
                 if image_url: node_kwargs.update({"shape": "circularImage", "image": image_url})
                 else: node_kwargs["shape"] = "dot"
                 net.add_node(node, **node_kwargs)
@@ -298,8 +397,6 @@ if action_mode == "📊 Main Dashboard (Graph & Maps)":
             for u, v, attrs in G.edges(data=True):
                 net.add_edge(u, v, label=attrs.get("relation", ""), title=attrs.get("relation", ""), 
                              color="#475569", font={"size": 10, "color": "#94A3B8", "align": "middle"})
-
-            net.force_atlas_2based(gravity=-120, central_gravity=0.015, spring_length=180, spring_strength=0.06, overlap=0.8)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
                 net.save_graph(tmp.name)
@@ -311,20 +408,18 @@ if action_mode == "📊 Main Dashboard (Graph & Maps)":
 
     with t2:
         st.subheader("All-India CCTNS Spatial Radar")
-        st.caption("Dynamically plots crime occurrence hotspots across all 36 States & UTs based on FIRs and Watchlist entries.")
         
         state_counts = {}
         for row in fir_rows:
-            st_name = row[2] # State from FIR
+            st_name = row[2] 
             state_counts[st_name] = state_counts.get(st_name, 0) + 1
         for w in watchlist_rows:
-            st_name = w[3] # State from Watchlist
+            st_name = w[4] 
             state_counts[st_name] = state_counts.get(st_name, 0) + 1
             
         map_data = []
         for state_name, coords in STATE_COORDINATES.items():
             count = state_counts.get(state_name, 0)
-            # Create a base dot for all states, make it larger/red if crime exists
             radius = 15000 + (count * 40000) if count > 0 else 10000
             color = [239, 68, 68, 200] if count > 0 else [100, 116, 139, 100]
             
@@ -365,7 +460,7 @@ elif action_mode == "📝 File Custom FIR (Structured)":
     with st.container():
         st.markdown('<div class="form-container">', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
-        c_fir_no = c1.text_input("FIR Number", "FIR-2026-001")
+        c_fir_no = c1.text_input("FIR Number (Must be Unique) *", "FIR-2026-001")
         c_state = c2.selectbox("State / UT", list(STATE_COORDINATES.keys()))
         c_station = c1.text_input("Police Station", "Central Crime Branch")
         c_location = c2.text_input("Specific Crime Location", "Main Street Bank")
@@ -380,12 +475,21 @@ elif action_mode == "📝 File Custom FIR (Structured)":
             sc1, sc2 = st.columns(2)
             s_name = sc1.text_input(f"Full Name (A{i+1})", key=f"s_name_{i}")
             s_phone = sc2.text_input(f"Phone Number (A{i+1})", key=f"s_ph_{i}")
+            
+            sc3, sc4 = st.columns(2)
+            s_aadhaar = sc3.text_input(f"Aadhaar Number (Optional)", key=f"s_aadh_{i}")
+            s_pan = sc4.text_input(f"PAN Number (Optional)", key=f"s_pan_{i}")
+            
+            s_address = st.text_input(f"Home Address (Optional)", key=f"s_add_{i}")
             s_details = st.text_input(f"Involvement Details / Reason", key=f"s_det_{i}")
             s_photo = st.file_uploader(f"Upload Face Photo (A{i+1})", type=["jpg", "png"], key=f"s_pic_{i}")
             
             if s_name:
                 img_b64, img_hash = process_uploaded_image(s_photo)
-                suspects_collected.append({"name": s_name, "rank": f"A{i+1}", "reason": s_details, "phone": s_phone, "image": img_b64, "face_hash": img_hash})
+                suspects_collected.append({
+                    "name": s_name, "rank": f"A{i+1}", "reason": s_details, "phone": s_phone, 
+                    "image": img_b64, "face_hash": img_hash, "aadhaar": s_aadhaar, "pan": s_pan, "address": s_address
+                })
     if st.button("➕ Add Another Suspect"): 
         st.session_state.suspect_count += 1
         st.rerun()
@@ -424,6 +528,8 @@ elif action_mode == "📝 File Custom FIR (Structured)":
     if st.button("💾 Ingest Structured FIR into Database", type="primary", use_container_width=True):
         if not c_fir_no or not c_station:
             st.error("FIR Number and Police Station are required.")
+        elif fir_exists(c_fir_no):
+            st.error(f"❌ Duplicate Error: FIR Number '{c_fir_no.upper()}' already exists in the database. Please use a unique FIR number.")
         else:
             structured_entities = {
                 "Suspects": suspects_collected, "Witnesses": witnesses_collected,
@@ -431,8 +537,8 @@ elif action_mode == "📝 File Custom FIR (Structured)":
             }
             mo_pattern = detect_modus_operandi(fir_text)
             primary_hash = suspects_collected[0].get("face_hash", "") if suspects_collected else ""
-            insert_fir(c_fir_no, c_state, c_station, fir_text, mo_pattern, structured_entities, primary_hash)
-            st.success(f"✅ FIR {c_fir_no} ingested successfully! All entities structured and linked.")
+            insert_fir(c_fir_no.upper(), c_state, c_station, fir_text, mo_pattern, structured_entities, primary_hash)
+            st.success(f"✅ FIR {c_fir_no.upper()} ingested successfully! All entities structured and linked.")
 
 # =============================================================================
 # VIEW 3: ADD TO WATCHLIST
@@ -449,6 +555,12 @@ elif action_mode == "👤 Add to Watchlist":
         w_state = wc1.selectbox("Operating State / UT", list(STATE_COORDINATES.keys()))
         w_gang = wc2.text_input("Gang / Terror Outfit Name")
         
+        st.markdown("---")
+        wc_a, wc_b = st.columns(2)
+        w_aadhaar = wc_a.text_input("Aadhaar Number (Optional)")
+        w_pan = wc_b.text_input("PAN Number (Optional)")
+        w_address = st.text_input("Known Home / Hideout Address (Optional)")
+
         st.markdown("---")
         w_jail = st.text_input("Past Jail / Arrest Record Details")
         w_mo = st.selectbox("Known Modus Operandi (MO)", [
@@ -467,8 +579,10 @@ elif action_mode == "👤 Add to Watchlist":
         if st.button("🚨 Register Profile in DB", type="primary", use_container_width=True):
             if w_name:
                 img_b64, img_hash = process_uploaded_image(w_photo)
-                insert_watchlist_criminal(w_name, w_alias, w_state, w_gang, w_jail, w_mo, w_phone, w_vehicle, img_hash, img_b64)
-                st.success(f"✅ Profile for '{w_name}' registered successfully and linked to Intelligence Grid!")
+                # Auto-generate Unique Watchlist ID
+                wl_id = "WL-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+                insert_watchlist_criminal(wl_id, w_name, w_alias, w_state, w_gang, w_jail, w_mo, w_phone, w_vehicle, img_hash, img_b64, w_aadhaar, w_pan, w_address)
+                st.success(f"✅ Profile for '{w_name}' registered successfully! Assigned Unique ID: **{wl_id}**")
             else:
                 st.error("Criminal Full Name is required.")
 
@@ -481,9 +595,14 @@ elif action_mode == "📂 View Database Records":
     tab_firs, tab_watch = st.tabs(["📄 FIR Records", "👤 Watchlist Profiles"])
     
     with tab_firs:
+        search_fir_input = st.text_input("🔍 Search by FIR Number:")
         rows = get_all_firs()
+        
+        if search_fir_input:
+            rows = [r for r in rows if search_fir_input.upper() in r[1].upper()]
+            
         if not rows:
-            st.info("No FIRs found in the database.")
+            st.info("No FIRs found matching your search.")
         else:
             for row in rows:
                 f_id, fir_no, state, station, timestamp, text, mo_pattern, entities_json, face_hash = row
@@ -501,6 +620,9 @@ elif action_mode == "📂 View Database Records":
                                     st.markdown(f'<img src="{s["image"]}" width="120" style="border-radius:10px;">', unsafe_allow_html=True)
                                 st.write(f"**[{s.get('rank')}] {s.get('name')}**")
                                 st.caption(f"Phone: {s.get('phone')}")
+                                if s.get('aadhaar'): st.caption(f"Aadhaar: {s.get('aadhaar')}")
+                                if s.get('pan'): st.caption(f"PAN: {s.get('pan')}")
+                                if s.get('address'): st.caption(f"Address: {s.get('address')}")
                                 st.caption(f"Reason: {s.get('reason')}")
                     else: st.write("None")
                     
@@ -508,18 +630,32 @@ elif action_mode == "📂 View Database Records":
                     if entities.get("Vehicles"):
                         for v in entities["Vehicles"]:
                             st.write(f"- 🚗 **{v.get('plate')}** ({v.get('description')})")
-                            if v.get("image"):
-                                st.markdown(f'<img src="{v["image"]}" width="150" style="border-radius:5px;">', unsafe_allow_html=True)
                     else: st.write("None")
+                    
+                    st.markdown("---")
+                    d_col1, d_col2 = st.columns([1, 4])
+                    del_pass = d_col1.text_input("Delete Password", type="password", key=f"df_p_{f_id}")
+                    if d_col2.button("❌ Delete this FIR", key=f"df_b_{f_id}"):
+                        if del_pass == "0123":
+                            delete_fir(f_id)
+                            st.rerun()
+                        else:
+                            st.error("Invalid password")
 
     with tab_watch:
+        search_wl_input = st.text_input("🔍 Search by Watchlist ID:")
         w_rows = get_all_watchlist()
+        
+        if search_wl_input:
+            w_rows = [w for w in w_rows if w[1] and search_wl_input.upper() in w[1].upper()]
+            
         if not w_rows:
-            st.info("No Criminals in Watchlist.")
+            st.info("No Watchlist Profiles found matching your search.")
         else:
             for w in w_rows:
-                w_id, name, alias, state, gang, jail_rec, mo, phone, vehicle, face_hash, img_b64 = w
-                with st.expander(f"🚨 {name} (Alias: {alias}) | {state}"):
+                w_id, wl_id, name, alias, state, gang, jail_rec, mo, phone, vehicle, face_hash, img_b64, aadhaar, pan, address = w
+                header_text = f"🚨 {name} (Alias: {alias}) | ID: {wl_id} | State: {state}"
+                with st.expander(header_text):
                     wc1, wc2 = st.columns([1, 3])
                     with wc1:
                         if img_b64:
@@ -531,3 +667,16 @@ elif action_mode == "📂 View Database Records":
                         st.write(f"**Past Record:** {jail_rec}")
                         st.write(f"**Known Phone:** {phone}")
                         st.write(f"**Known Vehicle:** {vehicle}")
+                        if aadhaar: st.write(f"**Aadhaar:** {aadhaar}")
+                        if pan: st.write(f"**PAN:** {pan}")
+                        if address: st.write(f"**Address:** {address}")
+                        
+                    st.markdown("---")
+                    wd_col1, wd_col2 = st.columns([1, 4])
+                    w_del_pass = wd_col1.text_input("Delete Password", type="password", key=f"dw_p_{w_id}")
+                    if wd_col2.button("❌ Delete Profile", key=f"dw_b_{w_id}"):
+                        if w_del_pass == "0123":
+                            delete_watchlist(w_id)
+                            st.rerun()
+                        else:
+                            st.error("Invalid password")
